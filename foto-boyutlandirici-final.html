@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fotoğraf Boyutlandırıcı</title>
+<style>
+  body{font-family:Arial, sans-serif; margin:20px; background: #f4f4f4; color:#333;}
+  .controls{
+    display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+    background: #fff; padding: 15px; border-radius: 8px; margin-bottom: 15px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+  }
+  input[type="number"]{ width: 80px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+  button{ padding: 8px 12px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 4px; font-weight: bold; transition: 0.2s; }
+  button.active-mode { background: #4a90e2; color: white; border-color: #357abd; }
+  
+  #sizeList { display: flex; gap: 6px; margin-bottom: 15px; flex-wrap: wrap; }
+  .size-item { 
+    padding: 5px 12px; background: #fff; border: 1px solid #ccc; border-radius: 20px; 
+    cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 8px;
+  }
+  .size-item.active { border-color: #4a90e2; background: #eaf3ff; color: #4a90e2; font-weight: bold; }
+  .size-item span { color: #ccc; }
+  .size-item span:hover { color: #d00; }
+
+  #drop{ border: 2px dashed #bbb; padding: 40px; text-align: center; background: #fff; cursor: pointer; border-radius: 8px; color: #666; margin-bottom: 20px; }
+  .thumb{ display: inline-block; margin: 10px; background: #fff; padding: 5px; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+  canvas{ display: block; background: #eee; cursor: move; }
+  
+  .sync-box { margin-left: 10px; font-size: 13px; font-weight: bold; color: #d35400; }
+</style>
+</head>
+<body>
+
+<h3>Fotoğraf Boyutlandırıcı</h3>
+
+<div class="controls">
+  <label>G: <input id="wInput" type="number" value="350"></label>
+  <label>Y: <input id="hInput" type="number" value="390"></label>
+  <button id="saveSize">Ölçü Kaydet</button>
+
+  <button id="btnBgWhite">Beyaz</button>
+  <button id="btnBgBlur">Blur</button>
+  <button id="btnBgManual" class="active-mode">Manuel</button>
+
+  <div class="sync-box">
+    <label><input type="checkbox" id="syncCheck"> Hepsini Aynı Anda Yönet</label>
+  </div>
+
+  <button id="downloadAll" style="background:#4CAF50; color:white; border:none; margin-left:auto;">Hepsini İndir</button>
+  <button id="clearAll" style="background:#f44336; color:white; border:none;">Temizle</button>
+</div>
+
+<div id="sizeList"></div>
+<div id="drop">Dosyaları buraya sürükle veya tıkla</div>
+<input id="file" type="file" accept="image/*" multiple hidden>
+<div id="output"></div>
+
+<script>
+let W = 350, H = 390;
+let bgMode = 'manual';
+let loadedImages = [];
+let globalT = { scale: 1, x: 0, y: 0 };
+let sizes = JSON.parse(localStorage.getItem('sizes')) || [];
+
+const wInput = document.getElementById('wInput'), hInput = document.getElementById('hInput');
+const syncCheck = document.getElementById('syncCheck'), out = document.getElementById('output');
+const fileIn = document.getElementById('file'), drop = document.getElementById('drop');
+
+// ÖLÇÜ KAYDETME VE LİSTELEME
+function renderSizes(){
+  const sizeListDiv = document.getElementById('sizeList');
+  sizeListDiv.innerHTML = '';
+  sizes.forEach((s, i) => {
+    const item = document.createElement('div');
+    item.className = 'size-item' + (s.w === W && s.h === H ? ' active' : '');
+    item.innerHTML = `${s.w} × ${s.h} <span data-idx="${i}">✕</span>`;
+    item.onclick = () => {
+      W = s.w; H = s.h; wInput.value = W; hInput.value = H;
+      resetTransforms(); // Ölçü değişince pozisyonu sıfırla ki oraya "açılsın"
+      renderSizes(); renderAll();
+    };
+    item.querySelector('span').onclick = (e) => {
+      e.stopPropagation(); sizes.splice(i, 1);
+      localStorage.setItem('sizes', JSON.stringify(sizes)); renderSizes();
+    };
+    sizeListDiv.appendChild(item);
+  });
+}
+renderSizes();
+
+document.getElementById('saveSize').onclick = () => {
+    W = parseInt(wInput.value); H = parseInt(hInput.value);
+    if(!sizes.some(s => s.w === W && s.h === H)){
+        sizes.push({w:W, h:H}); localStorage.setItem('sizes', JSON.stringify(sizes));
+    }
+    resetTransforms(); renderSizes(); renderAll();
+};
+
+// MODLAR
+const setMode = (m) => {
+    bgMode = m;
+    ['btnBgWhite', 'btnBgBlur', 'btnBgManual'].forEach(id => document.getElementById(id).classList.remove('active-mode'));
+    document.getElementById('btnBg' + m.charAt(0).toUpperCase() + m.slice(1)).classList.add('active-mode');
+    renderAll();
+};
+document.getElementById('btnBgWhite').onclick = () => setMode('white');
+document.getElementById('btnBgBlur').onclick = () => setMode('blur');
+document.getElementById('btnBgManual').onclick = () => setMode('manual');
+
+// DOSYA GİRİŞİ
+drop.onclick = () => fileIn.click();
+fileIn.onchange = (e) => [...e.target.files].forEach(handleFile);
+drop.ondragover = (e) => e.preventDefault();
+drop.ondrop = (e) => { e.preventDefault(); [...e.dataTransfer.files].forEach(handleFile); };
+
+function handleFile(file){
+    if(!file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+            const data = { img, name: file.name, t: calculateFit(img) };
+            if(loadedImages.length === 0) globalT = JSON.parse(JSON.stringify(data.t));
+            loadedImages.push(data); renderAll();
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+// Otomatik sığdırma (Senin orjinal kodun gibi)
+function calculateFit(img) {
+    const scale = Math.min(W / img.naturalWidth, H / img.naturalHeight);
+    return { scale, x: (W - img.naturalWidth * scale) / 2, y: (H - img.naturalHeight * scale) / 2 };
+}
+
+function resetTransforms() {
+    loadedImages.forEach(item => item.t = calculateFit(item.img));
+    if(loadedImages[0]) globalT = calculateFit(loadedImages[0].img);
+}
+
+function renderAll() {
+    out.innerHTML = '';
+    W = parseInt(wInput.value) || W; H = parseInt(hInput.value) || H;
+
+    loadedImages.forEach((item, index) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'thumb';
+        const canvas = document.createElement('canvas');
+        canvas.width = W; canvas.height = H;
+        canvas.dataset.name = item.name;
+        const ctx = canvas.getContext('2d');
+
+        const draw = () => {
+            ctx.clearRect(0, 0, W, H);
+            const activeT = syncCheck.checked ? globalT : item.t;
+            
+            if (bgMode === 'white') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); }
+            else if (bgMode === 'blur') {
+                ctx.filter = 'blur(15px)'; ctx.drawImage(item.img, -10, -10, W+20, H+20);
+                ctx.filter = 'none'; ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillRect(0,0,W,H);
+            }
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(item.img, activeT.x, activeT.y, item.img.naturalWidth * activeT.scale, item.img.naturalHeight * activeT.scale);
+        };
+
+        canvas.onmousedown = (e) => {
+            const targetT = syncCheck.checked ? globalT : item.t;
+            let sX = e.clientX - targetT.x, sY = e.clientY - targetT.y;
+            const move = (me) => {
+                targetT.x = me.clientX - sX; targetT.y = me.clientY - sY;
+                syncCheck.checked ? renderAll() : draw();
+            };
+            const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+            window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+        };
+
+        canvas.onwheel = (e) => {
+            e.preventDefault();
+            const factor = Math.pow(1.1, -e.deltaY / 200);
+            const targetT = syncCheck.checked ? globalT : item.t;
+            targetT.x = e.offsetX - (e.offsetX - targetT.x) * factor;
+            targetT.y = e.offsetY - (e.offsetY - targetT.y) * factor;
+            targetT.scale *= factor;
+            syncCheck.checked ? renderAll() : draw();
+        };
+
+        draw(); wrap.appendChild(canvas); out.appendChild(wrap);
+    });
+}
+
+document.getElementById('downloadAll').onclick = () => {
+    document.querySelectorAll('canvas').forEach(c => {
+        const a = document.createElement('a');
+        a.download = c.dataset.name.split('.')[0] + ".jpg";
+        a.href = c.toDataURL('image/jpeg', 0.95); a.click();
+    });
+};
+document.getElementById('clearAll').onclick = () => { loadedImages = []; renderAll(); };
+wInput.oninput = renderAll; hInput.oninput = renderAll;
+</script>
+</body>
+</html>
